@@ -1,0 +1,6 @@
+streamlit==1.52.2
+mcp==1.25.0
+pgeocode==0.4.1
+openai==1.60.1
+langchain-openai==0.2.10
+requests==2.32.5
