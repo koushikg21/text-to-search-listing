@@ -1,6 +1,11 @@
 streamlit==1.52.2
-mcp==1.25.0
-pgeocode==0.4.1
+
+# LLM + agents
 openai==1.60.1
 langchain-openai==0.2.10
+langgraph>=0.0.40
+
+# MCP + utilities
+mcp==1.25.0
 requests==2.32.5
+pgeocode==0.4.1
