@@ -16,7 +16,9 @@ import requests
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import tool
+from langgraph.prebuilt import create_react_agent
 
+# --- 1. Define Strict Pydantic Schemas ---
 
 class AgentResult(TypedDict):
     filters: dict[str, Any]
@@ -49,23 +51,6 @@ LISTING_ALLOWED_FIELDS = [
     "pets",
 ]
 
-SYSTEM_PROMPT = """You are an input parser agent for Airbnb MCP tools.
-Given recent user chat messages, extract the best-guess tool arguments or ask a concise clarifying question when required info is missing.
-
-Response format (JSON only):
-{
-  "filters": { ... },   // only allowed keys for the tool
-  "question": null | "short clarifying question"
-}
-
-Rules:
-- Allowed keys vary per tool (provided below). Do not invent keys.
-- For dates, use YYYY-MM-DD. For numbers, use integers. If year not mentioned, take the most sensible year (e.g., next occurrence).
-- Do not hallucinate values. If required fields are missing or ambiguous, leave filters empty and set a one-sentence question.
-- If all required fields are present, set question to null.
-- You can call resolve_place_id to turn a location description into a Google placeId.
-- You can call resolve_date_range for fuzzy dates like "this weekend" or "next Friday" or unclear dates to get concrete check-in/out dates.
-"""
 
 def resolve_place_id(
     query: str,
@@ -296,123 +281,29 @@ def resolve_date_range_tool(
     """
     return resolve_date_range(text, reference_date, timezone, default_nights)
 
-import streamlit as st
-def parse_filters_with_llm(
-    text: str,
-    tool_name: str,
-    *,
-    model: str | None = None,
-    api_key: str | None = None,
-) -> AgentResult:
-    """
-    Call an OpenAI-compatible model to extract tool filters from a single input string.
-    Returns filters + optional clarifying question. Falls back to empty result on error.
-    """
-    if not text.strip():
-        return {"filters": {}, "question": None, "tool_trace": []}
-    api_key = api_key or os.getenv("OPENAI_API_KEY")
-    model_name = model or os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-
-    allowed = SEARCH_ALLOWED_FIELDS if tool_name == "airbnb_search" else LISTING_ALLOWED_FIELDS
-    required = ["location"] if tool_name == "airbnb_search" else ["id"]
-    tool_hint = (
-        "Tool: airbnb_search. Allowed keys: "
-        + ", ".join(allowed)
-        + f". Required: {', '.join(required)}."
-    )
-    if tool_name == "airbnb_listing_details":
-        tool_hint = (
-            "Tool: airbnb_listing_details. Allowed keys: "
-            + ", ".join(allowed)
-            + f". Required: {', '.join(required)}."
-        )
-
-    llm = ChatOpenAI(
-        model=model_name,
-        api_key=api_key,
-        temperature=0,
-    )
-    llm_with_tools = llm.bind_tools([resolve_place_id_tool, resolve_date_range_tool])
-
-    timezone_name = datetime.now().astimezone().tzname() or "UTC"
-    today_str = date.today().isoformat()
-    messages = [
-        SystemMessage(content=SYSTEM_PROMPT),
-        HumanMessage(
-            content=tool_hint
-            + f"\nReference date: {today_str}\nTimezone: {timezone_name}\n\nInput:\n"
-            + text
+def parse_filters_with_langgraph(user_input: str) -> AirbnbAgentResponse:
+    # 1. Initialize the LLM
+    llm = ChatOpenAI(model="gpt-4o", temperature=0)
+    
+    # 2. Define the tools
+    tools = [resolve_place_id_tool, resolve_date_range_tool]
+    
+    # 3. Create the Agent
+    # 'response_format' is the key: it forces the final node to return our Pydantic model
+    agent = create_react_agent(
+        llm, 
+        tools=tools,
+        prompt=(
+            "You are a helpful Airbnb assistant. "
+            "Use the tools provided to resolve locations and dates. "
+            f"Today's date is {date.today().isoformat()}."
         ),
-    ]
+        response_format=AirbnbAgentResponse
+    )
 
-    tool_trace: list[str] = []
-    response = llm_with_tools.invoke(messages)
-    if response.tool_calls:
-        tool_messages = []
-        for call in response.tool_calls:
-            name = call.get("name")
-            args = call.get("args", {}) or {}
-            if name == "resolve_place_id_tool":
-                resolved = resolve_place_id(
-                    str(args.get("query", "")).strip(),
-                    region=args.get("region"),
-                    language=args.get("language"),
-                )
-                tool_trace.append(
-                    "resolve_place_id_tool -> "
-                    f"{resolved.get('place_id')} ({resolved.get('formatted_address')})"
-                )
-                tool_messages.append(
-                    ToolMessage(
-                        content=json.dumps(resolved),
-                        tool_call_id=call.get("id"),
-                    )
-                )
-            elif name == "resolve_date_range_tool":
-                resolved = resolve_date_range(
-                    str(args.get("text", "")).strip(),
-                    str(args.get("reference_date", today_str)).strip(),
-                    str(args.get("timezone", timezone_name)).strip(),
-                    int(args.get("default_nights", 2)),
-                )
-                tool_trace.append(
-                    "resolve_date_range_tool -> "
-                    f"{resolved.get('checkin')} to {resolved.get('checkout')} "
-                    f"({resolved.get('confidence')})"
-                )
-                tool_messages.append(
-                    ToolMessage(
-                        content=json.dumps(resolved),
-                        tool_call_id=call.get("id"),
-                    )
-                )
-        if tool_messages:
-            messages = messages + [response] + tool_messages
-            response = llm.invoke(messages)
-
-    raw_text = response.content or "{}"
-
-    try:
-        parsed = json.loads(raw_text)
-    except Exception:
-        return {"filters": {}, "question": None, "tool_trace": tool_trace}
-
-    filters = parsed.get("filters") or {}
-    question = parsed.get("question")
-
-    # Filter to allowed keys and drop empty/None values
-    cleaned_filters = {
-        key: value
-        for key, value in filters.items()
-        if key in allowed and value not in (None, "", [])
-    }
-
-    if required and not all(k in cleaned_filters for k in required):
-        # If required info still missing, prompt with a question if provided.
-        return {
-            "filters": {},
-            "question": question or f"Can you share the {', '.join(required)}?",
-            "tool_trace": tool_trace,
-        }
-
-    return {"filters": cleaned_filters, "question": question, "tool_trace": tool_trace}
+    # 4. Invoke and get the structured result
+    # LangGraph handles the loop: LLM calls tool -> Tool runs -> LLM sees result -> Agent finishes
+    result = agent.invoke({"messages": [("user", user_input)]})
+    
+    # The 'structured_response' key contains our AirbnbAgentResponse object
+    return result["structured_response"]

@@ -8,8 +8,27 @@ from langchain_openai import ChatOpenAI
 from langchain_core.tools import tool
 from langgraph.prebuilt import create_react_agent
 from llm import resolve_place_id, resolve_date_range
+from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 
 # --- 1. Define Strict Pydantic Schemas ---
+
+SYSTEM_PROMPT = """You are an input parser agent for Airbnb MCP tools.
+Given recent user chat messages, extract the best-guess tool arguments or ask a concise clarifying question when required info is missing.
+
+Response format (JSON only):
+{
+  "filters": { ... },   // only allowed keys for the tool
+  "question": null | "short clarifying question"
+}
+
+Rules:
+- Allowed keys vary per tool (provided below). Do not invent keys.
+- For dates, use YYYY-MM-DD. For numbers, use integers. If year not mentioned, take the most sensible year (e.g., next occurrence).
+- Do not hallucinate values. If required fields are missing or ambiguous, leave filters empty and set a one-sentence question.
+- If all required fields are present, set question to null.
+- You can call resolve_place_id to turn a location description into a Google placeId.
+- You can call resolve_date_range for fuzzy dates like "this weekend" or "next Friday" or unclear dates to get concrete check-in/out dates.
+"""
 
 class AirbnbFilters(BaseModel):
     """Strict search filters for the Airbnb API."""
@@ -75,7 +94,12 @@ def parse_filters_with_langgraph(user_input: str) -> AirbnbAgentResponse:
 
     # 4. Invoke and get the structured result
     # LangGraph handles the loop: LLM calls tool -> Tool runs -> LLM sees result -> Agent finishes
-    result = agent.invoke({"messages": [("user", user_input)]})
+    result = agent.invoke({
+    "messages": [
+        SystemMessage(content=SYSTEM_PROMPT),
+        HumanMessage(content=user_input),
+    ]
+})
     
     # The 'structured_response' key contains our AirbnbAgentResponse object
     return result["structured_response"]

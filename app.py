@@ -6,7 +6,8 @@ from setup import build_listing_url, call_mcp_tool, extract_links
 from test import parse_filters_with_langgraph
 import pandas as pd
 
-st.set_page_config(page_title="Airbnb MCP demo", page_icon="🏠", layout="wide")
+st.set_page_config(page_title="Text2Stay Agent", page_icon="🏠", layout="wide")
+st.caption("An experimental agent that turns natural language into structured Airbnb search filters using MCP + tool calling.")
 
 logging.warning(
     "EXPERIMENTAL APP: Not production-ready. "
@@ -16,7 +17,6 @@ st.warning(
     "⚠️ Experimental Demo – Not for Production Use\n\n"
     "This application is a personal prototype built for educational and research purposes only. "
     "It is not affiliated with, endorsed by, or supported by Airbnb. "
-    "Data access may bypass robots.txt."
 )
 
 st.markdown(
@@ -88,7 +88,10 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+
 # Chat state
+if "query_history" not in st.session_state:
+    st.session_state.query_history = []
 if "chat_messages" not in st.session_state:
     st.session_state.chat_messages = []
 if "search_requested" not in st.session_state:
@@ -99,12 +102,19 @@ def add_chat_message():
     user_text = st.session_state.get("chat_input", "").strip()
     if not user_text:
         return
-    st.session_state.chat_messages = [{"role": "user", "text": user_text}]
+    st.session_state.query_history.append(user_text)
+    st.session_state.chat_messages = [
+        {"role": "user", "text": entry} for entry in st.session_state.query_history
+    ]
     st.session_state.search_requested = True
+    st.session_state.chat_input = ""
 
 
 def clear_chat_input():
     st.session_state.chat_input = ""
+    st.session_state.query_history = []
+    st.session_state.chat_messages = []
+    st.session_state.search_requested = False
 
 
 with st.sidebar:
@@ -114,11 +124,10 @@ with st.sidebar:
         "Describe the accommodation you are looking for",
         key="chat_input",
         height=160,
-        disabled=bool(st.session_state.get("chat_input", "").strip()),
     )
-    if st.session_state.chat_messages:
-        for msg in st.session_state.chat_messages:
-            chat_container.markdown(f"**You:** {msg['text']}")
+    if st.session_state.query_history:
+        combined_query = " ".join(st.session_state.query_history)
+        chat_container.markdown(f"**Current query:** {combined_query}")
     else:
         chat_container.caption("Describe what you want (e.g., '2 adults in 94103 under $300 Oct 12-15').")
 
@@ -133,8 +142,8 @@ with st.sidebar:
     agent_question: str | None = None
     agent_trace: list[str] = []
     latest_input = ""
-    if st.session_state.chat_messages:
-        latest_input = st.session_state.chat_messages[-1].get("text", "")
+    if st.session_state.query_history:
+        latest_input = " ".join(st.session_state.query_history)
         try:
             agent_result = parse_filters_with_langgraph(latest_input)
             agent_filters = agent_result.filters
@@ -146,7 +155,7 @@ with st.sidebar:
     if agent_filters:
         st.caption("Agent-parsed filters from chat")
         st.json(agent_filters)
-    elif st.session_state.chat_messages:
+    elif st.session_state.query_history:
         st.caption("Agent did not return any filters.")
 
     if agent_question:
